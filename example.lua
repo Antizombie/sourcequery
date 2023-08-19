@@ -1,22 +1,14 @@
-local sourcequery = require("sourcequery")
 local timer = require('timer')
+local sourcequery = require("sourcequery2")
 
-local servers = {}
+sourcequery.CreateServer(3177)
 
-local function ServerListUpdate(server)
-	for k, v in pairs( server ) do
-		servers[k]=v
-	end
-end
-
-sourcequery.CreateServer(nil, nil, ServerListUpdate)
+sourcequery.Servercallback:on('message', function(data)
+	print('message')
+end)
 
 sourcequery.SendServerQuery("188.120.231.157", 27015)
-sourcequery.SendServerQuery("188.120.231.157", 27016)
-sourcequery.SendServerQuery("188.120.231.157", 27017)
 
-timer.setInterval(10000, function()
+timer.setInterval(5000, function()
 	sourcequery.SendServerQuery("188.120.231.157", 27015)
-	sourcequery.SendServerQuery("188.120.231.157", 27016)
-	sourcequery.SendServerQuery("188.120.231.157", 27017)
 end)
