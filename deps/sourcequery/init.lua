@@ -1,7 +1,7 @@
 local Buffer = require('buffer').Buffer
-local dgram = require('dgram')
-local sock = dgram.createSocket('udp4')
-local PrintTable = require('PrintTable')
+local sock = require('dgram').createSocket('udp4')
+local Emitter = require('core').Emitter
+local string = string
 
 local SimplePacket = "\xFF\xFF\xFF\xFF"
 local MultiPacket = "\xFF\xFF\xFF\xFE"
@@ -13,90 +13,175 @@ local A2S_PLAYER = "\x55" --'U' Details about each player on the server.
 local A2S_RULES = "\x56" --'V' The rules the server is using.
 local A2A_PING = "\x69" --'i' Ping the server. (DEPRECATED)
 local A2S_SERVERQUERY_GETCHALLENGE = "\x57" --'W' Returns a challenge number for use in the player and rules query. (DEPRECATED)
+local S2C_CHALLENGE = "\x41" -- Cервер может ответить клиенту вызовом с использованием S2C_CHALLENGE ('A' или 0x41) после, номер вызова, нужно повторить запрос с номером вызова.
+local A2S_INFO_Response = "\x49"
+local END_string = "\x00"
 
-local Querys = 0
-
-local ServersCache = {}
+local ServerNil = {}
+ServerNil.A2S_INFO = {
+	["Header"] = "I",
+	["Protocol"] = 0,
+	["HostName"] = "Timeout Host",
+	["Map"] = "None",
+	["Folder"] = "None",
+	["Game"] = "None",
+	["ID"] = 0,
+	["Players"] = 0,
+	["MaxPlayers"] = 0,
+	["Bots"] = 0,
+	["ServerType"] = "d",
+	["Environment"] = "l",
+	["Visibility"] = 0,
+	["VAC"] = 0,
+	["Version"] = 0,
+}
 
 local function StopServer(force)
-	if force or Querys == 0 then
-		sock:close()
+	sock:close()
+end
+
+local function ExtractPayload(sourcePackage)
+	sourcePackage = Buffer:new(sourcePackage)
+	local Header = sourcePackage:readInt32BE(1)
+	if Header == -1 then
+		return sourcePackage:toString(5)
+	elseif Header == -2 then
+		print("Ещё не реализовал ответ из нескольких пакетов")
+	else
+		print("В этом пакете нет корректного заголовка")
 	end
 end
 
-local function CreateServer(BindPort,BindIP,server1)
-	BindPort = BindPort or math.random(20000,25000)
+local IS = {}
+
+function IS:cfind()
+	local index = string.find(self.value, "\x00", 1)
+	if index then
+		local cfind = string.sub(self.value, 1, index - 1)
+		self.value = string.sub(self.value, index + 1)
+		return cfind
+	end
+	return nil
+end
+
+function IS:cbyte()
+	local cbyte = string.byte(self.value, 1)
+	self.value = string.sub(self.value, 2)
+	return cbyte
+end
+
+function IS:csub(finish)
+	local csub = string.sub(self.value, 1, finish)
+	self.value = string.sub(self.value, finish + 1)
+	return csub
+end
+
+function IS:parseSignedInt16()
+	local data = self.value
+	local byte1 = string.byte(data, 1)
+	local byte2 = string.byte(data, 2)
+	local value = byte2 * 256 + byte1
+	if value > 32767 then
+		value = value - 65536
+	end
+	self.value = string.sub(data, 3)
+	return value
+end
+
+local function createIS(str)
+	local initializedString = { value = str or "" }
+	setmetatable(initializedString, {
+		__index = IS,
+		__tostring = function(self)
+			return self.value
+		end,
+		__concat = function(a, b)
+			return tostring(a)..tostring(b)
+		end
+
+	})
+	return initializedString
+end
+
+local function Parse_A2S_INFO(payload, Port, Host)
+	local ServerTemp = ServerNil.A2S_INFO
+	ServerTemp.Protocol = payload:cbyte()
+	ServerTemp.HostName = payload:cfind()
+	ServerTemp.Map = payload:cfind()
+	ServerTemp.Folder = payload:cfind()
+	ServerTemp.Game = payload:cfind()
+	ServerTemp.ID = payload:parseSignedInt16()
+	ServerTemp.Players = payload:cbyte()
+	ServerTemp.MaxPlayers = payload:cbyte()
+	ServerTemp.Bots = payload:cbyte()
+	ServerTemp.ServerType = payload:csub(1)
+	ServerTemp.Environment = payload:csub(1)
+	ServerTemp.Visibility = payload:cbyte()
+	ServerTemp.VAC = payload:cbyte()
+	if ServerTemp.ID == 2400 then -- The Ship
+		ServerTemp.GameMode = payload:csub(1)
+		ServerTemp.WitnessCount = payload:csub(1)
+		ServerTemp.WitnessTime = payload:csub(1)
+	end
+	ServerTemp.Version = payload:cfind()
+	if #tostring(payload) > 0 then
+		local EDF = payload:cbyte()
+		if bit.band(EDF, 128) ~= 0 then
+			ServerTemp.PORT = payload:parseSignedInt16()
+		end
+		if bit.band(EDF, 16) ~= 0 then
+			payload:csub(9) -- Не допетрил как нормально вывести "long long" - 64 bit unsigned integer 
+		end
+		if bit.band(EDF, 64) ~= 0 then
+			ServerTemp.SourceTVport = payload:parseSignedInt16()
+			ServerTemp.SourceTVname = payload:cfind()
+		end
+		if bit.band(EDF, 32) ~= 0 then
+			ServerTemp.Tags = payload:cfind()
+		end
+		if bit.band(EDF, 1) ~= 0 then
+			payload:csub(9) -- Не допетрил как нормально вывести "long long" - 64 bit unsigned integer 
+		end
+	end
+	return ServerTemp
+end
+
+local Servercallback = Emitter:extend()
+function Servercallback:initialize(callback)
+	if callback then
+		self:on('message', callback)
+	end
+end
+
+sock:on('message', function(data, rinfo)
+	local Port = rinfo['port']
+	local Host = rinfo['ip']
+	local Payload = createIS(ExtractPayload(data))
+	local Header = Payload:csub(1, 1)
+	if Header == S2C_CHALLENGE then
+		sock:send(SimplePacket..A2S_INFO..SourceEngineQuery..Payload, Port, Host)
+		return
+	end
+	if Header == A2S_INFO_Response then
+		local server = Parse_A2S_INFO(Payload)
+		Servercallback:emit('message', server)
+	end
+end)
+
+local function CreateServer(BindPort,BindIP)
+	BindPort = BindPort or math.random(20000, 25000)
 	BindIP = BindIP or "0.0.0.0"
 	sock:bind(BindPort,BindIP)
-	sock:setTimeout(1000)
-
-	sock:on('message', function(data, rinfo)
-		local Port = rinfo['port']
-		local Host = rinfo['ip']
-		ServersCache[Host..":"..Port] = nil
-		Querys = Querys - 1
-		if #data == 9 and string.match(data, SimplePacket..".....") then
-			local datasend = SimplePacket..A2S_INFO..SourceEngineQuery..string.sub(data, 6, 9)
-			sock:send(datasend , Port, Host)
-			Querys = Querys + 1
-			ServersCache[Host..":"..Port] = {}
-		elseif #data > 9 then
-			local server = {}
-			server[Host..":"..Port]={}
-			local index3 = 1
-			for i=1,4 do
-				index, index2 = string.find(data,"[%z]+",index3)
-					if index == nil then break end
-				index3 = index2 + 1
-			end
-			server[Host..":"..Port]["Header"]=string.sub(data,5,5)
-			server[Host..":"..Port]["Protocol"]=string.byte(string.sub(data,6,6))
-
-			data2 = string.sub(data, 7,  index2-1)
-			for w in data2:gmatch("([^%z]+)") do
-				server[Host..":"..Port][#server[Host..":"..Port] + 1] = w 
-			end
-			local bs = Buffer:new( string.sub(data,index2+3,index2+5))
-
-			for i=1,bs.length do
-				Newst = #server[Host..":"..Port] + 1
-				server[Host..":"..Port][Newst] = bs[i]
-			end
-
-			local NameDate = {[1]="HostName",[2]="Map",[3]="Folder",[4]="Game",[5]="Players",[6]="MaxPlayers",[7]="Bots"}
-
-			for i = 1,#server[Host..":"..Port] do 
-				server[Host..":"..Port][ NameDate[i] ] = server[Host..":"..Port][i]
-				server[Host..":"..Port][i] = nil
-			end
-			server1(server)
-		end
-	end)
-	sock:on('timeout', function()
-		Querys = Querys - 1
-		server1(ServersCache)
-	end)
 end
 
 local function SendServerQuery(Host, Port)
 	Port = Port or 27015
 	sock:send(SimplePacket..A2S_INFO..SourceEngineQuery, Port, Host)
-	ServersCache[Host..":"..Port] = {}
-	ServersCache[Host..":"..Port]["Header"] = "I"
-	ServersCache[Host..":"..Port]["Protocol"] = 0
-	ServersCache[Host..":"..Port]["HostName"] = "Timeout Host"
-	ServersCache[Host..":"..Port]["Map"] = "None"
-	ServersCache[Host..":"..Port]["Folder"] = "None"
-	ServersCache[Host..":"..Port]["Game"] = "None"
-	ServersCache[Host..":"..Port]["Players"] = 0
-	ServersCache[Host..":"..Port]["MaxPlayers"] = 0
-	ServersCache[Host..":"..Port]["Bots"] = 0
-	Querys = Querys + 1
 end
 
-
 return {
-  CreateServer = CreateServer,
-  SendServerQuery = SendServerQuery,
-  StopServer = StopServer,
+	CreateServer = CreateServer,
+	SendServerQuery = SendServerQuery,
+	StopServer = StopServer,
+	Servercallback = Servercallback,
 }
