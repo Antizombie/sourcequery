@@ -17,25 +17,6 @@ local S2C_CHALLENGE = "\x41" -- Cервер может ответить клие
 local A2S_INFO_Response = "\x49"
 local END_string = "\x00"
 
-local ServerNil = {}
-ServerNil.A2S_INFO = {
-	["Header"] = "I",
-	["Protocol"] = 0,
-	["HostName"] = "Timeout Host",
-	["Map"] = "None",
-	["Folder"] = "None",
-	["Game"] = "None",
-	["ID"] = 0,
-	["Players"] = 0,
-	["MaxPlayers"] = 0,
-	["Bots"] = 0,
-	["ServerType"] = "d",
-	["Environment"] = "l",
-	["Visibility"] = 0,
-	["VAC"] = 0,
-	["Version"] = 0,
-}
-
 local function StopServer(force)
 	sock:close()
 end
@@ -104,7 +85,7 @@ local function createIS(str)
 end
 
 local function Parse_A2S_INFO(payload, Port, Host)
-	local ServerTemp = ServerNil.A2S_INFO
+	local ServerTemp = {}
 	ServerTemp.Protocol = payload:cbyte()
 	ServerTemp.HostName = payload:cfind()
 	ServerTemp.Map = payload:cfind()
@@ -163,8 +144,7 @@ sock:on('message', function(data, rinfo)
 		return
 	end
 	if Header == A2S_INFO_Response then
-		local server = Parse_A2S_INFO(Payload)
-		Servercallback:emit('message', server)
+		Servercallback:emit('message', Parse_A2S_INFO(Payload), Host, Port)
 	end
 end)
 
